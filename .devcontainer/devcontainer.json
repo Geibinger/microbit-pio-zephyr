@@ -1,0 +1,28 @@
+{
+  "name": "Zephyr + PlatformIO Dev Container",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "settings": {
+    "terminal.integrated.defaultProfile.linux": "bash"
+  },
+  "extensions": [
+    "platformio.platformio-ide",
+    "ms-vscode.cpptools",
+    "ms-python.python"
+  ],
+  "mounts": [
+    "source=/dev,target=/dev,type=bind",
+    "source=/etc/udev,target=/etc/udev,type=bind"
+  ],
+  "runArgs": [
+    "--privileged",
+    "--cap-add=SYS_PTRACE",
+    "--device=/dev/ttyUSB0",
+    "--device=/dev/ttyACM0",
+    "--device=/dev/serial/by-id",
+    "--volume=/dev/bus/usb:/dev/bus/usb"
+  ],
+  "remoteUser": "root",
+  "postCreateCommand": "pio pkg install"
+}
