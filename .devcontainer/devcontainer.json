@@ -3,17 +3,26 @@
   "build": {
     "dockerfile": "Dockerfile"
   },
-  "settings": {
-    "terminal.integrated.defaultProfile.linux": "bash"
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash"
+      },
+      "extensions": [
+        "platformio.platformio-ide",
+        "ms-vscode.cpptools",
+        "ms-python.python",
+        "xaver.clang-format",
+        "cschlosser.doxdocgen",
+        "alexnesnes.teleplot",
+        "ms-vscode.cmake-tools"
+      ]
+    }
   },
-  "extensions": [
-    "platformio.platformio-ide",
-    "ms-vscode.cpptools",
-    "ms-python.python"
-  ],
   "mounts": [
     "source=/dev,target=/dev,type=bind",
-    "source=/etc/udev,target=/etc/udev,type=bind"
+    "source=/etc/udev,target=/etc/udev,type=bind",
+    "source=/var/run/dbus,target=/var/run/dbus,type=bind"
   ],
   "runArgs": [
     "--privileged",
@@ -21,7 +30,8 @@
     "--device=/dev/ttyUSB0",
     "--device=/dev/ttyACM0",
     "--device=/dev/serial/by-id",
-    "--volume=/dev/bus/usb:/dev/bus/usb"
+    "--volume=/dev/bus/usb:/dev/bus/usb",
+    "--net=host"
   ],
   "remoteUser": "root",
   "postCreateCommand": "pio pkg install"

@@ -1,6 +1,10 @@
 {
     "files.associations": {
         "printk.h": "c",
-        "bluetooth.h": "c"
-    }
+        "bluetooth.h": "c",
+        "zephyr.h": "c",
+        "sensor.h": "c"
+    },
+    "C_Cpp.formatting": "clangFormat",
+    "editor.formatOnSave": true,
 }
