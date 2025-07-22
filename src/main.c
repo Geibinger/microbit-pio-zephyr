@@ -19,12 +19,64 @@
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/conn.h>
 #include <bluetooth/gatt.h>
+
+#include <drivers/pwm.h>
+
+#include <drivers/gpio.h>
 #include <drivers/i2c.h>
 #include <drivers/sensor.h>
 #include <settings/settings.h>
 
 #define DEVICE_NAME CONFIG_BT_DEVICE_NAME
 #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
+
+// Servo stuff:
+
+// Servo configuration (see the device tree file for the pins)
+// The servos are connected to the PWM controller, which is defined in the app.overlay file
+// in the zephyr directory.
+#define SERVO1_PIN DT_PROP(DT_NODELABEL(pwm0), ch0_pin)
+#define SERVO2_PIN DT_PROP(DT_NODELABEL(pwm0), ch1_pin)
+#define PWM_PERIOD_USEC 20000U // 20 ms pwm frame
+static const struct device *pwm_dev;
+
+// Convert –100...+100% “speed” to 1000...2000 µs pulse
+static inline uint32_t speed_to_usec(int8_t speed) {
+    if (speed > 100)
+        speed = 100;
+    else if (speed < -100)
+        speed = -100;
+    // 1500 µs is the stop position, 1000 µs is full reverse, 2000 µs is full forward
+    return 1500U + (int32_t)speed * 5U;
+}
+
+static void servo_set_speed(uint32_t pin, int8_t speed) {
+    uint32_t pulse = speed_to_usec(speed);
+    int err = pwm_pin_set_usec(pwm_dev, pin, PWM_PERIOD_USEC, pulse, PWM_POLARITY_NORMAL);
+    if (err) {
+        printk("PWM set failed on pin %u (err %d)\n", pin, err);
+    }
+}
+
+// We will later setup the characteristic in a way that both servos are controlled through one characteristic,
+// For this, we need a callback function that takes a speed value and applies it to both servos
+// 0x64 -> 100% forward, 0x00 -> stop, 0x9C -> 100% reverse
+// Note that as the two servos are mirrors of each other, the sender is responsible for sending the correct speed values
+// In nordic app, the Byte Array write can be used to send the data, e.g. [0x9c, 0x64] to drive both servos forward
+static ssize_t write_servos(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *buf, uint16_t len, uint16_t offset, uint8_t flags) {
+
+    // We expect the buffer to contain two int8_t values, one for each servo
+    if (len != 2) {
+        return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+    }
+    const int8_t *speeds = buf;
+    // Set the speed for both servos
+    servo_set_speed(SERVO1_PIN, speeds[0]);
+    servo_set_speed(SERVO2_PIN, speeds[1]);
+    return 2;
+}
+
+// IMU stuff:
 
 // LSM303AGR device drivers exist for both accelerometer and magnetometer, the temperature sensor needs to be accessed directly via I2C (or a custom driver)
 // Note that these drivers are defined in the device tree (.dts) file of out micro:bit board. This and additional config files are located here:
@@ -53,6 +105,21 @@
 #define ADC_PD_MASK BIT(1)             // ADC_PD = 0 to enable ADC
 #define BDU_MASK BIT(7)                // BDU = 1 to enable block data update
 
+// Storage for our IMU data
+static int16_t accel3d[3];
+static int16_t mag3d[3];
+static int16_t temp_c100; // We need to use a 100x factor for fixed point representation, as this is how the temperature characteristic is defined in the Bluetooth specification
+
+// Device driver handles for our sensors
+// See https://academy.nordicsemi.com/courses/nrf-connect-sdk-intermediate/lessons/lesson-7-device-driver-dev/topic/device-driver-model-2/
+// for more details on the device driver model in Zephyr.
+static const struct device *accel_dev, *mag_dev, *i2c_dev;
+
+// Rounding helper
+static inline int16_t round_s16(double v) { return (int16_t)(v >= 0 ? v + 0.5 : v - 0.5); }
+
+// Bluetooth stuff:
+
 // As we do not commercially use this as a product, we can theoretically choose any UUID we want. But to illustrate the construction of such a UUID,
 // here we used the Bluetooth SIG base UUID as starting point and make modifications.
 // Commercial uses must be registered with the Bluetooth SIG and use a UUID from the assigned numbers list.
@@ -73,19 +140,6 @@
 // In our case, we simply use the generic "Device Information Service" with UUID 0x180A, resulting in the following:
 #define BT_UUID_SVC_VAL BT_UUID_128_ENCODE(0x0000180A, 0x0000, 0x1000, 0x8000, 0x00805F9B34FB)
 #define BT_UUID_SVC BT_UUID_DECLARE_128(BT_UUID_SVC_VAL)
-
-// Storage for our IMU data
-static int16_t accel3d[3];
-static int16_t mag3d[3];
-static int16_t temp_c100; // We need to use a 100x factor for fixed point representation, as this is how the temperature characteristic is defined in the Bluetooth specification
-
-// Device driver handles for our sensors
-// See https://academy.nordicsemi.com/courses/nrf-connect-sdk-intermediate/lessons/lesson-7-device-driver-dev/topic/device-driver-model-2/
-// for more details on the device driver model in Zephyr.
-static const struct device *accel_dev, *mag_dev, *i2c_dev;
-
-// Rounding helper
-static inline int16_t round_s16(double v) { return (int16_t)(v >= 0 ? v + 0.5 : v - 0.5); }
 
 // As accerometer is not defined per default, we define it here
 // TODO: With this current setup, the accerlerations is not correctly interpreted by the nRF Connect app,
@@ -116,7 +170,10 @@ BT_GATT_SERVICE_DEFINE(bt_svc,
 
                        // Temperature (sint16, units = °C * 0.01)
                        BT_GATT_CHARACTERISTIC(BT_UUID_TEMPERATURE, BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY, BT_GATT_PERM_READ, NULL, NULL, &temp_c100),
-                       BT_GATT_CCC(NULL, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE), );
+                       BT_GATT_CCC(NULL, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+
+                       // Servo control (2x int8_t, units = %, with -100% = full reverse, 0% = stop, +100% = full forward)
+                       BT_GATT_CHARACTERISTIC(BT_UUID_AICS_CONTROL, BT_GATT_CHRC_WRITE, BT_GATT_PERM_WRITE, NULL, write_servos, NULL), );
 
 // Here we define our advertising data. Note that we include the complete local name and the service UUID,
 // so that we can later find our device by name or UUID (later used in Python script and ROS2 node).
@@ -206,13 +263,45 @@ static void bt_ready(int err) {
     k_work_schedule(&imu_work, K_SECONDS(1));
 }
 
-void main(void) {
-    printk("Booting BLE IMU Demo\n");
+// Neopixel stuff:
 
+extern void ws2812_loop(const uint8_t *buf, int len); // This is implemented in assembly in the ws2812_loop.S file and is responsible for bit-banging the WS2812 protocol
+
+#define LED_COUNT 5
+#define STRIP_BYTES (LED_COUNT * 3)
+#define DELAY_MS 500
+
+//! With neopixel enabled, the current code currently results in:
+/*
+[00:02:04.289,398] ␛[1;31m<err> bt_conn: Unable to allocate TX context␛[0m
+[00:02:04.289,459] ␛[1;31m<err> bt_conn: Unable to allocate TX context␛[0m
+[00:02:07.254,577] ␛[1;31m<err> bt_conn: Unable to allocate TX context␛[0m
+[00:02:11.139,923] ␛[1;31m<err> bt_conn: Unable to allocate TX context␛[0m
+[00:02:13.184,936] ␛[1;31m<err> bt_conn: Unable to allocate TX context␛[0m
+[00:02:16.149,871] ␛[1;31m<err> bt_conn: Unable to allocate TX context␛[0m
+ASSERTION FAIL [!radio_is_ready()] @ ZEPHYR_BASE/subsys/bluetooth/controller/ll_sw/nordic/lll/lll_conn.c:324
+[00:02:21.342,163] ␛[1;31m<err> os: r0/a1:  0x00000003  r1/a2:  0x00000001  r2/a3:  0x00000001␛[0m
+[00:02:21.342,193] ␛[1;31m<err> os: r3/a4:  0x00019bd9 r12/ip:  0x00000000 r14/lr:  0x00017d39␛[0m
+[00:02:21.342,193] ␛[1;31m<err> os:  xpsr:  0x41000011␛[0m
+[00:02:21.342,193] ␛[1;31m<err> os: Faulting instruction address (r15/pc): 0x00017d44␛[0m
+[00:02:21.342,193] ␛[1;31m<err> os: >>> ZEPHYR FATAL ERROR 3: Kernel oops on CPU 0␛[0m
+[00:02:21.342,224] ␛[1;31m<err> os: Fault during interrupt handling
+␛[0m
+[00:02:21.342,224] ␛[1;31m<err> os: Current thread: 0x20001130 (unknown)␛[0m
+[00:02:21.394,714] ␛[1;31m<err> os: Halting system␛[0m
+*/
+
+void main(void) {
     // Retrieve the device handles for our sensors
     accel_dev = DEVICE_DT_GET(ACCEL_NODE);
     mag_dev = DEVICE_DT_GET(MAG_NODE);
     i2c_dev = DEVICE_DT_GET(I2C_NODE);
+
+    pwm_dev = device_get_binding(DT_LABEL(DT_NODELABEL(pwm0)));
+    if (!pwm_dev) {
+        printk("Error: PWM0 device not found\n");
+        return;
+    }
 
     if (!device_is_ready(accel_dev) || !device_is_ready(mag_dev) || !device_is_ready(i2c_dev)) {
         printk("Device not ready\n");
@@ -222,5 +311,32 @@ void main(void) {
     int rc = bt_enable(bt_ready);
     if (rc) {
         printk("bt_enable failed (err %d)\n", rc);
+    }
+
+    const struct device *gpio0 = device_get_binding("GPIO_0");
+    __ASSERT(gpio0, "GPIO_0 not found");
+    gpio_pin_configure(gpio0, 2, GPIO_OUTPUT_LOW); // P0.02 data out
+    k_msleep(100);                                 // allow strip to power up
+
+    uint8_t strip[STRIP_BYTES];
+
+    while (1) {
+        // ── GREEN ──
+        for (int i = 0; i < LED_COUNT; i++) {
+            strip[3 * i + 0] = 0xFF; // G
+            strip[3 * i + 1] = 0x00; // R
+            strip[3 * i + 2] = 0x00; // B
+        }
+        ws2812_loop(strip, STRIP_BYTES);
+        k_msleep(DELAY_MS);
+
+        // ── RED ──
+        for (int i = 0; i < LED_COUNT; i++) {
+            strip[3 * i + 0] = 0x00; // G
+            strip[3 * i + 1] = 0xFF; // R
+            strip[3 * i + 2] = 0x00; // B
+        }
+        ws2812_loop(strip, STRIP_BYTES);
+        k_msleep(DELAY_MS);
     }
 }

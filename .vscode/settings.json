@@ -3,7 +3,11 @@
         "printk.h": "c",
         "bluetooth.h": "c",
         "zephyr.h": "c",
-        "sensor.h": "c"
+        "sensor.h": "c",
+        "settings.h": "c",
+        "gatt.h": "c",
+        "led_strip.h": "c",
+        "gpio.h": "c"
     },
     "C_Cpp.formatting": "clangFormat",
     "editor.formatOnSave": true,

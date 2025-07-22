@@ -33,6 +33,5 @@
     "--volume=/dev/bus/usb:/dev/bus/usb",
     "--net=host"
   ],
-  "remoteUser": "root",
-  "postCreateCommand": "pio pkg install"
+  "remoteUser": "root"
 }

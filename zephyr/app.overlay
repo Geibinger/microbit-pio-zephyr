@@ -1,5 +1,6 @@
 &pwm0 {
     status = "okay";
+    /* TODO: Use the defined gpio3 and 4 in the bbc_microbit_v2.dts */
     /* P0.03 -> ring-1 on the micro:bit edge connector */
     ch0-pin = <3>;
     /* P0.04 -> ring-2 */

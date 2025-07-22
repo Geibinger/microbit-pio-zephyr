@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     git curl unzip wget cmake ninja-build g++ \
     build-essential pkg-config libffi-dev libssl-dev \
     udev usbutils clang-format \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+  && pip3 install --upgrade platformio \
+  && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 VOLUME ["/dev"]
