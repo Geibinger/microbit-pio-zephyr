@@ -1,6 +1,8 @@
 // General information on our board:
 // https://tech.microbit.org/hardware/schematic/
 
+// TODO: Add battery voltage sensing based on https://github.com/microbit-foundation/microbit-v2-battery-voltage
+
 #include <device.h>
 #include <devicetree.h>
 // The device tree for our nrf52833 is defined in the file
@@ -19,6 +21,7 @@
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/conn.h>
 #include <bluetooth/gatt.h>
+#include <bluetooth/services/dis.h>
 
 #include <drivers/pwm.h>
 
@@ -26,6 +29,13 @@
 #include <drivers/i2c.h>
 #include <drivers/sensor.h>
 #include <settings/settings.h>
+
+// We use the version.py script to generate a version.h file that contains the current git tag or commit hash
+// The script is executed before the pio build process starts, so that the version.h file is available during compilation
+#include "version.h"
+#ifndef FIRMWARE_VERSION
+#define FIRMWARE_VERSION "UNDEFINED"
+#endif
 
 #define DEVICE_NAME CONFIG_BT_DEVICE_NAME
 #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
@@ -118,6 +128,27 @@ static const struct device *accel_dev, *mag_dev, *i2c_dev;
 // Rounding helper
 static inline int16_t round_s16(double v) { return (int16_t)(v >= 0 ? v + 0.5 : v - 0.5); }
 
+// Neopixel stuff:
+
+extern void ws2812_loop(const uint8_t *buf, int len); // This is implemented in assembly in the ws2812_loop.S file and is responsible for bit-banging the WS2812 protocol
+
+#define LED_COUNT 5
+#define STRIP_BYTES (LED_COUNT * 3)
+
+static ssize_t write_leds(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *buf, uint16_t len, uint16_t offset, uint8_t flags) {
+    printk("write_leds called with len %d and data: ", len);
+    for (int i = 0; i < len; i++) {
+        printk("%02x ", ((const uint8_t *)buf)[i]);
+    }
+    printk("\n");
+    if (len != STRIP_BYTES) {
+        return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+    }
+    // Call the ws2812_loop function to send the data to the neopixels
+    ws2812_loop(buf, STRIP_BYTES);
+    return STRIP_BYTES;
+}
+
 // Bluetooth stuff:
 
 // As we do not commercially use this as a product, we can theoretically choose any UUID we want. But to illustrate the construction of such a UUID,
@@ -137,14 +168,31 @@ static inline int16_t round_s16(double v) { return (int16_t)(v >= 0 ? v + 0.5 : 
 // 2. Go to section "3.4 GATT Services" of the Bluetooth SIG assigned numbers list and find a service that fits to our use case, write down the UUID
 // 3. Replace the first 8 bytes of the base UUID with the service UUID
 //
-// In our case, we simply use the generic "Device Information Service" with UUID 0x180A, resulting in the following:
-#define BT_UUID_SVC_VAL BT_UUID_128_ENCODE(0x0000180A, 0x0000, 0x1000, 0x8000, 0x00805F9B34FB)
-#define BT_UUID_SVC BT_UUID_DECLARE_128(BT_UUID_SVC_VAL)
 
+// Service definitions:
+// In our case, we use a "Device Information Service" (DIS) UUID for general information like firmware version and hardware description
+// For this we use the predefined BT_UUID_DIS_VAL, which is defined in the Bluetooth specification
+// Here is our DIS data:
+// TODO: Use this in DIS
+static const char *manufacturer = "TU Vienna, Institute of Computer Engineering, Research Group Automation Systems";
+static const char *model_number = "Micro:bit-v2 Robot";
+static const char *hw_revision = "Rev A";
+static const char *fw_revision = FIRMWARE_VERSION; // from version.h
+static const char *sw_revision = "Zephyr";         // TODO: Add version from Zephyr
+
+// A custom UUID for a general Robot Control Service (RCS) that we use to control the servos, neopixels and publish accelerometer, magnetometer and temperature data
+#define BT_UUID_RCS_VAL 0xff00
+#define BT_UUID_RCS BT_UUID_DECLARE_16(BT_UUID_RCS_VAL)
+
+// Characteristic definitions:
 // As accerometer is not defined per default, we define it here
-// TODO: With this current setup, the accerlerations is not correctly interpreted by the nRF Connect app,
-// it might be that we need to use a different UUID or that the app does not support this characteristic
-#define BT_UUID_ACCEL_3D BT_UUID_DECLARE_16(0x2C1E)
+#define BT_UUID_ACCEL_3D BT_UUID_DECLARE_16(0xff01)
+
+// Servo control characteristics
+#define BT_UUID_SRV_CONTROL BT_UUID_DECLARE_16(0xff02)
+
+// Neopixel control characteristics
+#define BT_UUID_LED_CONTROL BT_UUID_DECLARE_16(0xff03)
 
 // As described in https://academy.nordicsemi.com/courses/bluetooth-low-energy-fundamentals/lessons/lesson-4-bluetooth-le-data-exchange/topic/attribute-table/
 // A GATT service is a collection of attributes that define the service itself and its characteristics.
@@ -157,8 +205,13 @@ static inline int16_t round_s16(double v) { return (int16_t)(v >= 0 ? v + 0.5 : 
 // for more details. All have a CCC (Client Characteristic Configuration) descriptor to allow notifications
 // Note that by using BT_GATT_CHRC_INDICATE instead of BT_GATT_CHRC_NOTIFY, we could also use indications instead of notifications,
 // with the difference that the client has to acknowledge the indications
-BT_GATT_SERVICE_DEFINE(bt_svc,
-                       BT_GATT_PRIMARY_SERVICE(BT_UUID_SVC),
+
+// The DIS service:
+BT_GATT_SERVICE_DEFINE(dis_svc, BT_GATT_PRIMARY_SERVICE(BT_UUID_DIS));
+
+// The RCS service:
+BT_GATT_SERVICE_DEFINE(rcs_svc,
+                       BT_GATT_PRIMARY_SERVICE(BT_UUID_RCS),
 
                        // Accelerometer (3x sint16, units = mm/s²)
                        BT_GATT_CHARACTERISTIC(BT_UUID_ACCEL_3D, BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY, BT_GATT_PERM_READ, NULL, NULL, accel3d),
@@ -173,8 +226,13 @@ BT_GATT_SERVICE_DEFINE(bt_svc,
                        BT_GATT_CCC(NULL, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 
                        // Servo control (2x int8_t, units = %, with -100% = full reverse, 0% = stop, +100% = full forward)
-                       BT_GATT_CHARACTERISTIC(BT_UUID_AICS_CONTROL, BT_GATT_CHRC_WRITE, BT_GATT_PERM_WRITE, NULL, write_servos, NULL), );
+                       BT_GATT_CHARACTERISTIC(BT_UUID_SRV_CONTROL, BT_GATT_CHRC_WRITE, BT_GATT_PERM_WRITE, NULL, write_servos, NULL),
 
+                       // Neopixel control (5x3x uint8_t, units = RGB, with 0x00 = off, 0xff = full brightness)
+                       BT_GATT_CHARACTERISTIC(BT_UUID_LED_CONTROL, BT_GATT_CHRC_WRITE, BT_GATT_PERM_WRITE, NULL, write_leds, NULL), );
+
+// helper: split a 16‑bit UUID into little‑endian bytes
+#define UUID16_BYTES(u) ((u)&0xFF), (((u) >> 8) & 0xFF)
 // Here we define our advertising data. Note that we include the complete local name and the service UUID,
 // so that we can later find our device by name or UUID (later used in Python script and ROS2 node).
 // For more details on advertising, see:
@@ -186,8 +244,8 @@ static const struct bt_data ad[] = {
     BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
     // Complete local name, so that we can find our device by name
     BT_DATA(BT_DATA_NAME_COMPLETE, DEVICE_NAME, DEVICE_NAME_LEN),
-    // Service UUID
-    BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_SVC_VAL),
+    // Services
+    BT_DATA_BYTES(BT_DATA_UUID16_ALL, UUID16_BYTES(BT_UUID_DIS_VAL), UUID16_BYTES(BT_UUID_RCS_VAL)),
 };
 
 // We use workqueues to periodically sample the sensors and notify the clients (a feature we get through the RTOS kernel)
@@ -233,13 +291,16 @@ static void imu_work_handler(struct k_work *work) {
     temp_c100 = round_s16(tmp * 100.0);
 
     // 4) Finally, we notify the clients about the new values
-    bt_gatt_notify(NULL, &bt_svc.attrs[2], accel3d, sizeof(accel3d));
-    bt_gatt_notify(NULL, &bt_svc.attrs[5], mag3d, sizeof(mag3d));
-    bt_gatt_notify(NULL, &bt_svc.attrs[8], &temp_c100, sizeof(temp_c100));
+    // first 3* 2 bytes are for the accelerometer, next 3*2 bytes for the magnetometer and last 2 bytes for the temperature
+    bt_gatt_notify(NULL, &rcs_svc.attrs[1], accel3d, sizeof(accel3d));
+    bt_gatt_notify(NULL, &rcs_svc.attrs[4], mag3d, sizeof(mag3d));
+    bt_gatt_notify(NULL, &rcs_svc.attrs[7], &temp_c100, sizeof(temp_c100));
 
     // 5) Reschedule the work to run again after 100 milliseconds
     k_work_schedule(&imu_work, K_MSEC(100));
 }
+
+static const char firmware_version[] = FIRMWARE_VERSION;
 
 static void bt_ready(int err) {
     if (err) {
@@ -248,6 +309,8 @@ static void bt_ready(int err) {
     }
 
     printk("Bluetooth initialized\n");
+
+    printk("Firmware version: %s\n", firmware_version);
 
     // Here we advertise, note that the second part would be for scan responses, but for our application, the data in ad suffices
     err = bt_le_adv_start(BT_LE_ADV_CONN, ad, ARRAY_SIZE(ad), NULL, 0);
@@ -262,14 +325,6 @@ static void bt_ready(int err) {
     // We start the first work after 1 second
     k_work_schedule(&imu_work, K_SECONDS(1));
 }
-
-// Neopixel stuff:
-
-extern void ws2812_loop(const uint8_t *buf, int len); // This is implemented in assembly in the ws2812_loop.S file and is responsible for bit-banging the WS2812 protocol
-
-#define LED_COUNT 5
-#define STRIP_BYTES (LED_COUNT * 3)
-#define DELAY_MS 500
 
 void main(void) {
     k_sleep(K_SECONDS(3)); // Wait for the system to stabilize
@@ -289,45 +344,18 @@ void main(void) {
         return;
     }
 
+    // For NeoPixels, we need to set the GPIO pins to output mode
+    const struct device *gpio0 = device_get_binding("GPIO_0");
+
+    if (!gpio0) {
+        printk("Error: GPIO_0 device not found\n");
+        return;
+    }
+
+    gpio_pin_configure(gpio0, 2, GPIO_OUTPUT_LOW); // P0.02 data out
+
     int rc = bt_enable(bt_ready);
     if (rc) {
         printk("bt_enable failed (err %d)\n", rc);
-    }
-
-    const struct device *gpio0 = device_get_binding("GPIO_0");
-    __ASSERT(gpio0, "GPIO_0 not found");
-    gpio_pin_configure(gpio0, 2, GPIO_OUTPUT_LOW); // P0.02 data out
-    k_msleep(100);                                 // allow strip to power up
-
-    uint8_t strip[STRIP_BYTES];
-
-    while (1) {
-        // ── GREEN ──
-        for (int i = 0; i < LED_COUNT; i++) {
-            strip[3 * i + 0] = 0xFF; // G
-            strip[3 * i + 1] = 0x00; // R
-            strip[3 * i + 2] = 0x00; // B
-        }
-        ws2812_loop(strip, STRIP_BYTES);
-        k_msleep(DELAY_MS);
-
-        // ── RED ──
-        for (int i = 0; i < LED_COUNT; i++) {
-            strip[3 * i + 0] = 0x00; // G
-            strip[3 * i + 1] = 0xFF; // R
-            strip[3 * i + 2] = 0x00; // B
-        }
-        ws2812_loop(strip, STRIP_BYTES);
-        k_msleep(DELAY_MS);
-
-        // ── BLUE ──
-        for (int i = 0; i < LED_COUNT; i++) {
-            strip[3 * i + 0] = 0x00; // G
-            strip[3 * i + 1] = 0x00; // R
-            strip[3 * i + 2] = 0xFF; // B
-        }
-
-        ws2812_loop(strip, STRIP_BYTES);
-        k_msleep(DELAY_MS);
     }
 }
