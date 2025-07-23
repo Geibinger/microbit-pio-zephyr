@@ -15,8 +15,6 @@ ws2812_loop:
     movs    r1, #1
     lsls    r1, r1, #2              @ mask = 1<<2
 
-    cpsid   i                       @ disable IRQs
-
     @—— Reset low (> 50 µs) ——@
     str     r1, [r2]
     ldr     r7, =3200               @ ~3200 *15.6 ns ≃ 50 µs
@@ -75,5 +73,4 @@ ws2812_loop:
     subs    r7, #1
     bne     .reset2
 
-    cpsie   i                       @ re-enable IRQs
     pop     {r4-r7, pc}

@@ -271,27 +271,8 @@ extern void ws2812_loop(const uint8_t *buf, int len); // This is implemented in 
 #define STRIP_BYTES (LED_COUNT * 3)
 #define DELAY_MS 500
 
-//! With neopixel enabled, the current code currently results in:
-/*
-[00:02:04.289,398] ␛[1;31m<err> bt_conn: Unable to allocate TX context␛[0m
-[00:02:04.289,459] ␛[1;31m<err> bt_conn: Unable to allocate TX context␛[0m
-[00:02:07.254,577] ␛[1;31m<err> bt_conn: Unable to allocate TX context␛[0m
-[00:02:11.139,923] ␛[1;31m<err> bt_conn: Unable to allocate TX context␛[0m
-[00:02:13.184,936] ␛[1;31m<err> bt_conn: Unable to allocate TX context␛[0m
-[00:02:16.149,871] ␛[1;31m<err> bt_conn: Unable to allocate TX context␛[0m
-ASSERTION FAIL [!radio_is_ready()] @ ZEPHYR_BASE/subsys/bluetooth/controller/ll_sw/nordic/lll/lll_conn.c:324
-[00:02:21.342,163] ␛[1;31m<err> os: r0/a1:  0x00000003  r1/a2:  0x00000001  r2/a3:  0x00000001␛[0m
-[00:02:21.342,193] ␛[1;31m<err> os: r3/a4:  0x00019bd9 r12/ip:  0x00000000 r14/lr:  0x00017d39␛[0m
-[00:02:21.342,193] ␛[1;31m<err> os:  xpsr:  0x41000011␛[0m
-[00:02:21.342,193] ␛[1;31m<err> os: Faulting instruction address (r15/pc): 0x00017d44␛[0m
-[00:02:21.342,193] ␛[1;31m<err> os: >>> ZEPHYR FATAL ERROR 3: Kernel oops on CPU 0␛[0m
-[00:02:21.342,224] ␛[1;31m<err> os: Fault during interrupt handling
-␛[0m
-[00:02:21.342,224] ␛[1;31m<err> os: Current thread: 0x20001130 (unknown)␛[0m
-[00:02:21.394,714] ␛[1;31m<err> os: Halting system␛[0m
-*/
-
 void main(void) {
+    k_sleep(K_SECONDS(3)); // Wait for the system to stabilize
     // Retrieve the device handles for our sensors
     accel_dev = DEVICE_DT_GET(ACCEL_NODE);
     mag_dev = DEVICE_DT_GET(MAG_NODE);
@@ -336,6 +317,16 @@ void main(void) {
             strip[3 * i + 1] = 0xFF; // R
             strip[3 * i + 2] = 0x00; // B
         }
+        ws2812_loop(strip, STRIP_BYTES);
+        k_msleep(DELAY_MS);
+
+        // ── BLUE ──
+        for (int i = 0; i < LED_COUNT; i++) {
+            strip[3 * i + 0] = 0x00; // G
+            strip[3 * i + 1] = 0x00; // R
+            strip[3 * i + 2] = 0xFF; // B
+        }
+
         ws2812_loop(strip, STRIP_BYTES);
         k_msleep(DELAY_MS);
     }
