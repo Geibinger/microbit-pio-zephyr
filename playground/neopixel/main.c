@@ -27,5 +27,25 @@ void main(void) {
         }
         ws2812_loop(strip, STRIP_BYTES);
         k_msleep(DELAY_MS);
+
+        // ── RED ──
+        for (int i = 0; i < LED_COUNT; i++) {
+            strip[3 * i + 0] = 0x00; // G
+            strip[3 * i + 1] = 0xFF; // R
+            strip[3 * i + 2] = 0x00; // B
+        }
+
+        ws2812_loop(strip, STRIP_BYTES);
+        k_msleep(DELAY_MS);
+
+        // ── BLUE ──
+        for (int i = 0; i < LED_COUNT; i++) {
+            strip[3 * i + 0] = 0x00; // G
+            strip[3 * i + 1] = 0x00; // R
+            strip[3 * i + 2] = 0xFF; // B
+        }
+
+        ws2812_loop(strip, STRIP_BYTES);
+        k_msleep(DELAY_MS);
     }
 }
